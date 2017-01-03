@@ -20,6 +20,8 @@ from ryu.controller import ofp_event
 from ryu.controller.handler import MAIN_DISPATCHER, DEAD_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.lib import hub
+from ryu.lib.packet import ether_types
+from ryu.lib.packet import in_proto
 
 
 class SimpleMonitor13(simple_switch2_13.SimpleSwitch2_13):
@@ -28,6 +30,8 @@ class SimpleMonitor13(simple_switch2_13.SimpleSwitch2_13):
         super(SimpleMonitor13, self).__init__(*args, **kwargs)
         self.datapaths = {}
         self.monitor_thread = hub.spawn(self._monitor)
+        self.eth_types = {ether_types.ETH_TYPE_ARP: 'ARP', ether_types.ETH_TYPE_IP: 'IP'}
+        self.protos = {in_proto.IPPROTO_TCP: 'TCP', in_proto.IPPROTO_UDP: 'UDP', in_proto.IPPROTO_ICMP: 'ICMP'}
 
     @set_ev_cls(ofp_event.EventOFPStateChange,
                 [MAIN_DISPATCHER, DEAD_DISPATCHER])
@@ -56,42 +60,52 @@ class SimpleMonitor13(simple_switch2_13.SimpleSwitch2_13):
         req = parser.OFPFlowStatsRequest(datapath)
         datapath.send_msg(req)
 
-        #req = parser.OFPPortStatsRequest(datapath, 0, ofproto.OFPP_ANY)
-        #datapath.send_msg(req)
-
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
         body = ev.msg.body
         
-        self.logger.info(body);
+        #self.logger.info(body);
 
-        self.logger.info('datapath         '
-                         'ipv4_src         ipv4_dst         '
-                         'ip_proto packets  bytes')
-        self.logger.info('---------------- '
+        self.logger.info('eth_type ip_proto '
+                         'ip_src           ip_dst           '
+                         'port_src port_dst '
+                         'tcp_flag '
+                         'packets  bytes')
+        self.logger.info('-------- -------- '
                          '---------------- ---------------- '
-                         '-------- -------- --------')
-        for stat in sorted([flow for flow in body if flow.priority == 1],
-                           key=lambda flow: (flow.match['ipv4_src'],
-                                             flow.match['ipv4_dst'])):
-            self.logger.info('%016x %16s %16s %8s %8d %8d',
-                             ev.msg.datapath.id,
-                             stat.match['ipv4_src'], stat.match['ipv4_dst'],
-                             stat.match['ip_proto'],
-                             stat.packet_count, stat.byte_count)
+                         '-------- -------- '
+                         '-------- '
+                         '-------- --------')
 
-    @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
-    def _port_stats_reply_handler(self, ev):
-        body = ev.msg.body
+        for stat in sorted([flow for flow in body if flow.priority == 2],
+                           key=lambda flow: (flow.match['eth_type'])):
+            if stat.match['eth_type'] == ether_types.ETH_TYPE_IP:
+                if stat.match['ip_proto'] == in_proto.IPPROTO_TCP:
+                    self.logger.info('%8s %8s %16s %16s %8d %8d %8d %8d %8d',
+                                     self.eth_types[stat.match['eth_type']], self.protos[stat.match['ip_proto']],
+                                     stat.match['ipv4_src'], stat.match['ipv4_dst'],
+                                     stat.match['tcp_src'], stat.match['tcp_dst'],
+                                     stat.match['tcp_flags'],
+                                     stat.packet_count, stat.byte_count)
+                elif stat.match['ip_proto'] == in_proto.IPPROTO_UDP:
+                    self.logger.info('%8s %8s %16s %16s %8d %8d %8d %8d %8d',
+                                     self.eth_types[stat.match['eth_type']], self.protos[stat.match['ip_proto']],
+                                     stat.match['ipv4_src'], stat.match['ipv4_dst'],
+                                     stat.match['udp_src'], stat.match['udp_dst'],
+                                     -1,
+                                     stat.packet_count, stat.byte_count)
+                elif stat.match['ip_proto'] == in_proto.IPPROTO_ICMP:
+                    self.logger.info('%8s %8s %16s %16s %8d %8d %8d %8d %8d',
+                                     self.eth_types[stat.match['eth_type']], self.protos[stat.match['ip_proto']],
+                                     stat.match['ipv4_src'], stat.match['ipv4_dst'],
+                                     -1, -1,
+                                     -1,
+                                     stat.packet_count, stat.byte_count)
+            elif stat.match['eth_type'] == ether_types.ETH_TYPE_ARP:
+                self.logger.info('%8s %8s %16s %16s %8d %8d %8d %8d %8d',
+                                 self.eth_types[stat.match['eth_type']], None,
+                                 stat.match['arp_spa'], stat.match['arp_tpa'],
+                                 -1, -1,
+                                 -1,
+                                 stat.packet_count, stat.byte_count)
 
-        self.logger.info('datapath         port     '
-                         'rx-pkts  rx-bytes rx-error '
-                         'tx-pkts  tx-bytes tx-error')
-        self.logger.info('---------------- -------- '
-                         '-------- -------- -------- '
-                         '-------- -------- --------')
-        for stat in sorted(body, key=attrgetter('port_no')):
-            self.logger.info('%016x %8x %8d %8d %8d %8d %8d %8d',
-                             ev.msg.datapath.id, stat.port_no,
-                             stat.rx_packets, stat.rx_bytes, stat.rx_errors,
-                             stat.tx_packets, stat.tx_bytes, stat.tx_errors)

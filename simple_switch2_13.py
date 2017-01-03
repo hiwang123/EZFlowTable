@@ -19,8 +19,12 @@ from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet
+from ryu.lib.packet import in_proto
 from ryu.lib.packet import ipv4
 from ryu.lib.packet import arp
+from ryu.lib.packet import tcp
+from ryu.lib.packet import udp
+from ryu.lib.packet import icmp
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ether_types
 
@@ -89,33 +93,11 @@ class SimpleSwitch2_13(app_manager.RyuApp):
         eth_type = eth.ethertype
         
         self.logger.info("%r"%pkt)
-        ipv4_src = -1
-        ipv4_dst = -1
-        ip_proto = 'arp'
-        is_ip = True
-        
-        #is arp
-        pkt_arp = pkt.get_protocol(arp.arp)
-        if pkt_arp:
-            # ignore arp packet
-            is_ip = False
-            ipv4_src = pkt_arp.src_ip
-            ipv4_dst = pkt_arp.dst_ip
-        
-        #else
-        pkt_ipv4 = pkt.get_protocol(ipv4.ipv4)
-        if pkt_ipv4:
-            ipv4_src = pkt_ipv4.src
-            ipv4_dst = pkt_ipv4.dst
-            ip_proto = pkt_ipv4.proto
-            
-
-        assert(ipv4_src != -1 and ipv4_dst != -1)
 
         dpid = datapath.id
         self.mac_to_port.setdefault(dpid, {})
 
-        self.logger.info("packet in %s %s %s %s, %s %s %s", dpid, src, dst, in_port, ipv4_src, ipv4_dst, ip_proto)
+        self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
 
         # learn a mac address to avoid FLOOD next time.
         self.mac_to_port[dpid][src] = in_port
@@ -126,22 +108,59 @@ class SimpleSwitch2_13(app_manager.RyuApp):
             out_port = ofproto.OFPP_FLOOD
 
         actions = [parser.OFPActionOutput(out_port)]
-        #self.logger.info(is_ip)
-        #self.logger.info("first")
+
         # install a flow to avoid packet_in next time
-        if out_port != ofproto.OFPP_FLOOD and is_ip:
-            #match = parser.OFPMatch(in_port=in_port, eth_dst=dst)
-            match = parser.OFPMatch(eth_type=eth_type, ipv4_src=ipv4_src, ipv4_dst=ipv4_dst, ip_proto=ip_proto)
-            #self.logger.info("match ok")
+        if out_port != ofproto.OFPP_FLOOD:
+            match = None
+            priority = 2
+            if eth_type == ether_types.ETH_TYPE_IP:
+                #is ip/icmp
+                pkt_ipv4 = pkt.get_protocol(ipv4.ipv4)
+                self.logger.info("packet is ip,")
+                if pkt_ipv4.proto == in_proto.IPPROTO_TCP:
+                    # is tcp: protocol, src/dst ip, src/dst port, tcp flag
+                    self.logger.info("tcp")
+                    pkt_tcp = pkt.get_protocol(tcp.tcp)
+                    match = parser.OFPMatch(eth_type=eth_type, ip_proto=pkt_ipv4.proto, ipv4_src=pkt_ipv4.src,
+                                            ipv4_dst=pkt_ipv4.dst, tcp_src=pkt_tcp.src_port, tcp_dst=pkt_tcp.dst_port,
+                                            tcp_flags=pkt_tcp.bits)
+                elif pkt_ipv4.proto == in_proto.IPPROTO_UDP:
+                    # is udp: protocol, src/dst ip, src/dst port
+                    self.logger.info("udp")
+                    pkt_udp = pkt.get_protocol(udp.udp)
+                    match = parser.OFPMatch(eth_type=eth_type, ip_proto=pkt_ipv4.proto, ipv4_src=pkt_ipv4.src,
+                                            ipv4_dst=pkt_ipv4.dst, udp_src=pkt_udp.src_port, udp_dst=pkt_udp.dst_port)
+                elif pkt_ipv4.proto == in_proto.IPPROTO_ICMP:
+                    #is icmp: protocol, src/dst ip
+                    self.logger.info("icmp")
+                    pkt_icmp = pkt.get_protocol(icmp.icmp)
+                    match = parser.OFPMatch(eth_type=eth_type, ip_proto=pkt_ipv4.proto, ipv4_src=pkt_ipv4.src,
+                                            ipv4_dst=pkt_ipv4.dst)
+                else:
+                    #other, ignore (temp.)
+                    self.logger.info("other")
+                    match = parser.OFPMatch(in_port=in_port, eth_dst=dst)
+                    priority = 1
+            elif eth_type == ether_types.ETH_TYPE_ARP:
+                # is arp: src/dst port
+                self.logger.info("packet is arp")
+                pkt_arp = pkt.get_protocol(arp.arp)
+                match = parser.OFPMatch(eth_type=eth_type, arp_spa=pkt_arp.src_ip, arp_tpa=pkt_arp.dst_ip)
+            else:
+                #other, ignore (temp.)
+                self.logger.info("packet is other")
+                match = parser.OFPMatch(in_port=in_port, eth_dst=dst)
+                priority = 1
+
             # verify if we have a valid buffer_id, if yes avoid to send both
             # flow_mod & packet_out
             if msg.buffer_id != ofproto.OFP_NO_BUFFER:
-                self.add_flow(datapath, 1, match, actions, msg.buffer_id)
+                self.add_flow(datapath, priority, match, actions, msg.buffer_id)
                 return
             else:
-                self.add_flow(datapath, 1, match, actions)
+                self.add_flow(datapath, priority, match, actions)
         data = None
-        self.logger.info(is_ip)
+
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
             data = msg.data
 
